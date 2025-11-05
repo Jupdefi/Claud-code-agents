@@ -1975,9 +1975,9 @@
         "./agents/posix-shell-pro.md"
       ],
       "skills": [
-        "./skills/bash-defensive-patterns/SKILL.md",
-        "./skills/shellcheck-configuration/SKILL.md",
-        "./skills/bats-testing-patterns/SKILL.md"
+        "./skills/bash-defensive-patterns",
+        "./skills/shellcheck-configuration",
+        "./skills/bats-testing-patterns"
       ]
     },
     {

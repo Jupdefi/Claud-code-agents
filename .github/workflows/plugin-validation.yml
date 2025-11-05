@@ -1,0 +1,242 @@
+name: Plugin Validation
+
+on:
+  push:
+    branches: [ main, master, develop ]
+    paths:
+      - '.claude-plugin/**'
+      - 'plugins/**'
+      - '.github/workflows/plugin-validation.yml'
+      - '.github/scripts/validate-plugins.py'
+  pull_request:
+    branches: [ main, master, develop ]
+    paths:
+      - '.claude-plugin/**'
+      - 'plugins/**'
+      - '.github/workflows/plugin-validation.yml'
+      - '.github/scripts/validate-plugins.py'
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  validate:
+    name: Validate Plugin Structure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better analysis
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Make validation script executable
+        run: chmod +x .github/scripts/validate-plugins.py
+
+      - name: Run plugin validation
+        id: validate
+        run: |
+          python .github/scripts/validate-plugins.py
+        env:
+          REPO_ROOT: ${{ github.workspace }}
+
+      - name: Upload validation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-results
+          path: |
+            .github/scripts/validate-plugins.py
+          retention-days: 30
+
+      - name: Comment PR with validation results
+        if: github.event_name == 'pull_request' && failure()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `## ❌ Plugin Validation Failed
+
+            The plugin validation checks have detected issues that need to be resolved before merging.
+
+            Please review the validation errors in the workflow logs and make the necessary corrections.
+
+            ### Common Issues:
+            - Missing or incorrect YAML frontmatter in agent/skill files
+            - Referenced files don't exist
+            - Invalid naming conventions (must be lowercase, hyphen-separated)
+            - Missing required fields in marketplace.json
+            - Invalid version format (should be semantic versioning: x.y.z)
+
+            **Action Required:** Fix the validation errors and push your changes.
+
+            [View full validation logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  validate-json-syntax:
+    name: Validate JSON Syntax
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate marketplace.json syntax
+        run: |
+          echo "🔍 Validating JSON syntax..."
+          if ! jq empty .claude-plugin/marketplace.json 2>/dev/null; then
+            echo "❌ Invalid JSON syntax in marketplace.json"
+            exit 1
+          fi
+          echo "✅ JSON syntax is valid"
+
+      - name: Check for duplicate keys
+        run: |
+          echo "🔍 Checking for duplicate plugin names..."
+          DUPLICATES=$(jq -r '.plugins[].name' .claude-plugin/marketplace.json | sort | uniq -d)
+          if [ -n "$DUPLICATES" ]; then
+            echo "❌ Duplicate plugin names found:"
+            echo "$DUPLICATES"
+            exit 1
+          fi
+          echo "✅ No duplicate plugin names"
+
+  file-structure:
+    name: Validate File Structure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check required directories
+        run: |
+          echo "🔍 Checking required directories..."
+
+          if [ ! -d ".claude-plugin" ]; then
+            echo "❌ Missing .claude-plugin directory"
+            exit 1
+          fi
+
+          if [ ! -d "plugins" ]; then
+            echo "❌ Missing plugins directory"
+            exit 1
+          fi
+
+          if [ ! -f ".claude-plugin/marketplace.json" ]; then
+            echo "❌ Missing marketplace.json"
+            exit 1
+          fi
+
+          echo "✅ All required directories and files exist"
+
+      - name: Check for empty plugin directories
+        run: |
+          echo "🔍 Checking for empty plugin directories..."
+          EMPTY_DIRS=$(find plugins -maxdepth 1 -type d -empty)
+          if [ -n "$EMPTY_DIRS" ]; then
+            echo "⚠️ Empty plugin directories found:"
+            echo "$EMPTY_DIRS"
+            echo "::warning::Empty plugin directories detected"
+          else
+            echo "✅ No empty plugin directories"
+          fi
+
+      - name: Check for orphaned plugin directories
+        run: |
+          echo "🔍 Checking for orphaned plugin directories..."
+
+          # Get plugin names from marketplace.json
+          MARKETPLACE_PLUGINS=$(jq -r '.plugins[].name' .claude-plugin/marketplace.json | sort)
+
+          # Get actual plugin directories
+          ACTUAL_PLUGINS=$(ls -1 plugins/ | sort)
+
+          # Find orphaned directories
+          ORPHANED=$(comm -13 <(echo "$MARKETPLACE_PLUGINS") <(echo "$ACTUAL_PLUGINS"))
+
+          if [ -n "$ORPHANED" ]; then
+            echo "⚠️ Plugin directories not referenced in marketplace.json:"
+            echo "$ORPHANED"
+            echo "::warning::Orphaned plugin directories detected"
+          else
+            echo "✅ All plugin directories are referenced in marketplace.json"
+          fi
+
+  security-check:
+    name: Security Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for sensitive data in plugin files
+        run: |
+          echo "🔍 Scanning for potential sensitive data..."
+
+          # Patterns that might indicate sensitive data
+          PATTERNS=(
+            "password\s*[:=]"
+            "api[_-]?key\s*[:=]"
+            "secret\s*[:=]"
+            "token\s*[:=]"
+            "Bearer\s+[A-Za-z0-9\-\._~\+\/]+"
+            "-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----"
+          )
+
+          FOUND=0
+          for pattern in "${PATTERNS[@]}"; do
+            MATCHES=$(grep -r -i -E "$pattern" plugins/ --include="*.md" || true)
+            if [ -n "$MATCHES" ]; then
+              echo "⚠️ Potential sensitive data pattern found: $pattern"
+              echo "$MATCHES"
+              FOUND=1
+            fi
+          done
+
+          if [ $FOUND -eq 1 ]; then
+            echo "::warning::Potential sensitive data patterns detected. Please review."
+          else
+            echo "✅ No obvious sensitive data patterns found"
+          fi
+
+  summary:
+    name: Validation Summary
+    runs-on: ubuntu-latest
+    needs: [validate, validate-json-syntax, file-structure, security-check]
+    if: always()
+
+    steps:
+      - name: Check validation results
+        run: |
+          echo "## 📊 Validation Summary"
+          echo ""
+          echo "✅ All validation checks completed"
+          echo ""
+          echo "Results:"
+          echo "- Plugin Structure: ${{ needs.validate.result }}"
+          echo "- JSON Syntax: ${{ needs.validate-json-syntax.result }}"
+          echo "- File Structure: ${{ needs.file-structure.result }}"
+          echo "- Security Check: ${{ needs.security-check.result }}"
+
+          if [ "${{ needs.validate.result }}" != "success" ] || \
+             [ "${{ needs.validate-json-syntax.result }}" != "success" ] || \
+             [ "${{ needs.file-structure.result }}" != "success" ]; then
+            echo ""
+            echo "❌ Some validation checks failed. Please review the logs above."
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ All critical validations passed!"
