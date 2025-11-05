@@ -1,0 +1,420 @@
+name: PR Quality Checks
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+
+jobs:
+  pr-title-check:
+    name: Validate PR Title
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check PR title format
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const title = pr.title;
+
+            // Check for conventional commit format
+            const conventionalCommitPattern = /^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\(.+\))?!?:\s.+/;
+
+            if (!conventionalCommitPattern.test(title)) {
+              const message = `⚠️ **PR Title Format Issue**
+
+              Your PR title doesn't follow the conventional commit format.
+
+              **Current title:**
+              \`${title}\`
+
+              **Expected format:**
+              \`type(scope): description\`
+
+              **Valid types:**
+              - \`feat:\` New feature
+              - \`fix:\` Bug fix
+              - \`docs:\` Documentation changes
+              - \`style:\` Code style changes (formatting, etc.)
+              - \`refactor:\` Code refactoring
+              - \`perf:\` Performance improvements
+              - \`test:\` Adding or updating tests
+              - \`chore:\` Maintenance tasks
+              - \`ci:\` CI/CD changes
+
+              **Examples:**
+              - \`feat(plugins): add new python-testing plugin\`
+              - \`fix(validation): correct YAML parsing error\`
+              - \`docs(readme): update installation instructions\`
+              - \`ci(workflows): add release automation\`
+
+              **Breaking changes:**
+              Add \`!\` before the colon for breaking changes:
+              - \`feat(api)!: remove deprecated endpoints\`
+
+              Please update your PR title to follow this format. This helps with automatic changelog generation! 🙏`;
+
+              await github.rest.issues.createComment({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: message
+              });
+
+              await github.rest.issues.addLabels({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['needs-title-fix']
+              });
+
+              console.log('❌ PR title does not follow conventional commit format');
+            } else {
+              // Remove 'needs-title-fix' label if it exists
+              try {
+                await github.rest.issues.removeLabel({
+                  issue_number: pr.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: 'needs-title-fix'
+                });
+              } catch (error) {
+                // Label doesn't exist, that's fine
+              }
+
+              console.log('✅ PR title follows conventional commit format');
+            }
+
+  pr-description-check:
+    name: Validate PR Description
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check PR description completeness
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+            const issues = [];
+
+            // Check minimum length
+            if (body.length < 50) {
+              issues.push('Description is too short (minimum 50 characters)');
+            }
+
+            // Check for issue reference
+            const issueReferencePattern = /#\d+|closes #\d+|fixes #\d+|resolves #\d+/i;
+            if (!issueReferencePattern.test(body)) {
+              issues.push('No issue reference found (use "Closes #123", "Fixes #123", or "#123")');
+            }
+
+            // Check for test plan or testing mention
+            const testingPattern = /test|testing|tested|validation|verified/i;
+            if (!testingPattern.test(body) && pr.changed_files > 5) {
+              issues.push('No testing information provided (especially important for larger PRs)');
+            }
+
+            // Provide feedback if issues found
+            if (issues.length > 0) {
+              const message = `📝 **PR Description Checklist**
+
+              Your PR description could be improved:
+
+              ${issues.map(issue => `- ⚠️ ${issue}`).join('\n')}
+
+              **Good PR descriptions include:**
+              - ✅ Clear summary of changes
+              - ✅ Reference to related issue(s)
+              - ✅ Testing details or test plan
+              - ✅ Screenshots (for UI changes)
+              - ✅ Breaking changes (if any)
+              - ✅ Migration notes (if needed)
+
+              **Example template:**
+              \`\`\`markdown
+              ## Summary
+              Brief description of what this PR does
+
+              ## Changes
+              - Added feature X
+              - Fixed bug Y
+              - Updated documentation Z
+
+              ## Related Issues
+              Closes #123
+              Relates to #456
+
+              ## Test Plan
+              - Tested scenario A
+              - Verified behavior B
+              - Ran test suite: all passing
+
+              ## Screenshots (if applicable)
+              [Add screenshots here]
+              \`\`\`
+
+              While these are recommendations, they help reviewers understand and merge your PR faster! 🚀`;
+
+              await github.rest.issues.createComment({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: message
+              });
+
+              console.log(`ℹ️ PR description has ${issues.length} improvement suggestion(s)`);
+            } else {
+              console.log('✅ PR description looks good');
+            }
+
+  pr-changes-summary:
+    name: Generate PR Changes Summary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Analyze and summarize changes
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+
+            // Get changed files
+            const files = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number
+            });
+
+            // Categorize changes
+            const categories = {
+              workflows: [],
+              plugins: [],
+              docs: [],
+              scripts: [],
+              marketplace: [],
+              other: []
+            };
+
+            let totalAdditions = 0;
+            let totalDeletions = 0;
+
+            for (const file of files.data) {
+              totalAdditions += file.additions;
+              totalDeletions += file.deletions;
+
+              if (file.filename.startsWith('.github/workflows/')) {
+                categories.workflows.push(file);
+              } else if (file.filename.startsWith('plugins/')) {
+                categories.plugins.push(file);
+              } else if (file.filename.startsWith('docs/') || file.filename.endsWith('.md')) {
+                categories.docs.push(file);
+              } else if (file.filename.startsWith('.github/scripts/')) {
+                categories.scripts.push(file);
+              } else if (file.filename.includes('marketplace.json')) {
+                categories.marketplace.push(file);
+              } else {
+                categories.other.push(file);
+              }
+            }
+
+            // Generate summary
+            let summary = `## 📊 PR Changes Summary\n\n`;
+            summary += `**Statistics:**\n`;
+            summary += `- Files changed: ${files.data.length}\n`;
+            summary += `- Additions: +${totalAdditions}\n`;
+            summary += `- Deletions: -${totalDeletions}\n`;
+            summary += `- Net change: ${totalAdditions - totalDeletions}\n\n`;
+
+            summary += `**Changes by category:**\n`;
+
+            if (categories.workflows.length > 0) {
+              summary += `\n### 🔧 Workflows (${categories.workflows.length} files)\n`;
+              categories.workflows.forEach(f => {
+                summary += `- \`${f.filename}\` (+${f.additions}/-${f.deletions})\n`;
+              });
+            }
+
+            if (categories.plugins.length > 0) {
+              summary += `\n### 🔌 Plugins (${categories.plugins.length} files)\n`;
+              categories.plugins.slice(0, 10).forEach(f => {
+                summary += `- \`${f.filename}\` (+${f.additions}/-${f.deletions})\n`;
+              });
+              if (categories.plugins.length > 10) {
+                summary += `- ... and ${categories.plugins.length - 10} more plugin files\n`;
+              }
+            }
+
+            if (categories.docs.length > 0) {
+              summary += `\n### 📚 Documentation (${categories.docs.length} files)\n`;
+              categories.docs.forEach(f => {
+                summary += `- \`${f.filename}\` (+${f.additions}/-${f.deletions})\n`;
+              });
+            }
+
+            if (categories.scripts.length > 0) {
+              summary += `\n### 📜 Scripts (${categories.scripts.length} files)\n`;
+              categories.scripts.forEach(f => {
+                summary += `- \`${f.filename}\` (+${f.additions}/-${f.deletions})\n`;
+              });
+            }
+
+            if (categories.marketplace.length > 0) {
+              summary += `\n### 🏪 Marketplace (${categories.marketplace.length} files)\n`;
+              categories.marketplace.forEach(f => {
+                summary += `- \`${f.filename}\` (+${f.additions}/-${f.deletions})\n`;
+              });
+            }
+
+            if (categories.other.length > 0) {
+              summary += `\n### 📄 Other (${categories.other.length} files)\n`;
+              categories.other.forEach(f => {
+                summary += `- \`${f.filename}\` (+${f.additions}/-${f.deletions})\n`;
+              });
+            }
+
+            summary += `\n---\n*This summary is auto-generated to help reviewers*`;
+
+            // Post as comment
+            await github.rest.issues.createComment({
+              issue_number: pr.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+
+            console.log('✅ Posted PR changes summary');
+
+  check-pr-conflicts:
+    name: Check for Merge Conflicts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check merge status
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+
+            if (pr.mergeable === false) {
+              const message = `⚠️ **Merge Conflict Detected**
+
+              This PR has merge conflicts that need to be resolved before it can be merged.
+
+              **How to resolve:**
+
+              1. **Update your local branch:**
+                 \`\`\`bash
+                 git fetch origin
+                 git checkout ${pr.head.ref}
+                 git merge origin/${pr.base.ref}
+                 \`\`\`
+
+              2. **Resolve conflicts:**
+                 - Open conflicting files
+                 - Look for conflict markers (\`<<<<<<<\`, \`=======\`, \`>>>>>>>\`)
+                 - Resolve the conflicts manually
+                 - Save the files
+
+              3. **Commit and push:**
+                 \`\`\`bash
+                 git add .
+                 git commit -m "chore: resolve merge conflicts"
+                 git push
+                 \`\`\`
+
+              **Need help?**
+              - Check our [Contributing Guide](.github/CONTRIBUTING.md)
+              - Ask for help in the PR comments
+              - Use \`git merge --abort\` to cancel if needed
+
+              Once resolved, the PR will be automatically re-checked. 🔄`;
+
+              await github.rest.issues.createComment({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: message
+              });
+
+              await github.rest.issues.addLabels({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['merge-conflict']
+              });
+
+              console.log('⚠️ PR has merge conflicts');
+            } else if (pr.mergeable === true) {
+              // Remove conflict label if it exists
+              try {
+                await github.rest.issues.removeLabel({
+                  issue_number: pr.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: 'merge-conflict'
+                });
+              } catch (error) {
+                // Label doesn't exist, that's fine
+              }
+
+              console.log('✅ PR is mergeable');
+            }
+
+  check-linked-issues:
+    name: Verify Linked Issues
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check for linked issues
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+
+            // Check for issue links
+            const issuePattern = /#(\d+)/g;
+            const closingPattern = /(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
+
+            const issueMatches = [...body.matchAll(issuePattern)];
+            const closingMatches = [...body.matchAll(closingPattern)];
+
+            if (issueMatches.length === 0 && pr.changed_files > 3) {
+              const message = `ℹ️ **No Linked Issues Found**
+
+              This PR doesn't appear to reference any issues.
+
+              **Why link issues?**
+              - Provides context for reviewers
+              - Helps track feature/bug progress
+              - Automatically closes issues when PR merges
+
+              **How to link:**
+              Add one of these to your PR description:
+              - \`Closes #123\` - Closes the issue when merged
+              - \`Fixes #123\` - Same as above
+              - \`Resolves #123\` - Same as above
+              - \`Related to #123\` - Links without closing
+
+              *If this PR doesn't relate to any existing issues, you can ignore this message.*`;
+
+              await github.rest.issues.createComment({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: message
+              });
+            } else if (closingMatches.length > 0) {
+              console.log(`✅ PR will close ${closingMatches.length} issue(s)`);
+            }

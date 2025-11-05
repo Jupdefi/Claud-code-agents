@@ -1,0 +1,361 @@
+name: Auto Labeling
+
+on:
+  issues:
+    types: [opened, edited]
+  pull_request_target:
+    types: [opened, edited, synchronize]
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+jobs:
+  auto-label-issues:
+    name: Auto-Label Issues
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issues'
+
+    steps:
+      - name: Label based on issue type
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issue = context.payload.issue;
+            const body = issue.body || '';
+            const title = issue.title.toLowerCase();
+            const labels = [];
+
+            // Detect issue type from template
+            if (body.includes('Bug Report') || body.includes('bug_report')) {
+              labels.push('bug');
+            } else if (body.includes('Feature Request') || body.includes('feature_request')) {
+              labels.push('enhancement');
+            } else if (body.includes('New Subagent') || body.includes('new_subagent')) {
+              labels.push('new-plugin');
+              labels.push('enhancement');
+            }
+
+            // Detect urgency/priority from title
+            if (title.includes('urgent') || title.includes('critical') || title.includes('security')) {
+              labels.push('priority-high');
+            }
+
+            // Detect area from title/body content
+            const content = (title + ' ' + body).toLowerCase();
+
+            // Plugin categories
+            if (content.match(/\b(plugin|agent|skill|command)\b/)) {
+              if (!labels.includes('new-plugin')) {
+                labels.push('plugin-update');
+              }
+            }
+
+            // Documentation
+            if (content.match(/\b(doc|documentation|readme|guide|tutorial)\b/)) {
+              labels.push('documentation');
+            }
+
+            // CI/CD and workflows
+            if (content.match(/\b(workflow|github action|ci\/cd|automation|pipeline)\b/)) {
+              labels.push('ci-cd');
+            }
+
+            // Infrastructure
+            if (content.match(/\b(infrastructure|deployment|kubernetes|docker|cloud)\b/)) {
+              labels.push('infrastructure');
+            }
+
+            // Security
+            if (content.match(/\b(security|vulnerability|cve|exploit|xss|injection)\b/)) {
+              labels.push('security');
+              labels.push('priority-high');
+            }
+
+            // Performance
+            if (content.match(/\b(performance|slow|speed|optimization|latency)\b/)) {
+              labels.push('performance');
+            }
+
+            // Testing
+            if (content.match(/\b(test|testing|unit test|integration test)\b/)) {
+              labels.push('testing');
+            }
+
+            // Good first issue detection
+            if (title.includes('good first issue') || body.includes('good first issue')) {
+              labels.push('good-first-issue');
+            }
+
+            // Help wanted
+            if (title.includes('help wanted') || body.includes('help wanted')) {
+              labels.push('help-wanted');
+            }
+
+            // Question
+            if (title.startsWith('how') || title.startsWith('why') || title.includes('?')) {
+              labels.push('question');
+            }
+
+            // Apply labels if any were detected
+            if (labels.length > 0) {
+              await github.rest.issues.addLabels({
+                issue_number: issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: labels
+              });
+
+              console.log(`✅ Added labels to issue #${issue.number}: ${labels.join(', ')}`);
+            }
+
+  auto-label-prs:
+    name: Auto-Label Pull Requests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request_target'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Label based on PR changes
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const labels = [];
+
+            // Get changed files
+            const files = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number
+            });
+
+            const changedFiles = files.data.map(f => f.filename);
+            const additions = files.data.reduce((sum, f) => sum + f.additions, 0);
+            const deletions = files.data.reduce((sum, f) => sum + f.deletions, 0);
+
+            // Detect PR type from conventional commit title
+            const title = pr.title.toLowerCase();
+            if (title.startsWith('feat:') || title.startsWith('feature:')) {
+              labels.push('enhancement');
+            } else if (title.startsWith('fix:')) {
+              labels.push('bug');
+            } else if (title.startsWith('docs:')) {
+              labels.push('documentation');
+            } else if (title.startsWith('refactor:')) {
+              labels.push('refactoring');
+            } else if (title.startsWith('test:')) {
+              labels.push('testing');
+            } else if (title.startsWith('chore:')) {
+              labels.push('maintenance');
+            } else if (title.startsWith('ci:')) {
+              labels.push('ci-cd');
+            } else if (title.startsWith('perf:')) {
+              labels.push('performance');
+            }
+
+            // Label based on changed files
+            const fileCategories = {
+              '.github/workflows/': 'ci-cd',
+              '.github/scripts/': 'ci-cd',
+              'plugins/': 'plugin-update',
+              'docs/': 'documentation',
+              '.claude-plugin/': 'marketplace-update',
+              'README.md': 'documentation',
+              'CONTRIBUTING.md': 'documentation',
+              'LICENSE': 'legal'
+            };
+
+            for (const [path, label] of Object.entries(fileCategories)) {
+              if (changedFiles.some(f => f.startsWith(path) || f === path)) {
+                if (!labels.includes(label)) {
+                  labels.push(label);
+                }
+              }
+            }
+
+            // Size labels
+            const totalChanges = additions + deletions;
+            if (totalChanges < 10) {
+              labels.push('size/XS');
+            } else if (totalChanges < 50) {
+              labels.push('size/S');
+            } else if (totalChanges < 250) {
+              labels.push('size/M');
+            } else if (totalChanges < 1000) {
+              labels.push('size/L');
+            } else {
+              labels.push('size/XL');
+            }
+
+            // Breaking change detection
+            if (title.includes('!:') || pr.body?.includes('BREAKING CHANGE')) {
+              labels.push('breaking-change');
+              labels.push('priority-high');
+            }
+
+            // Security-related changes
+            if (changedFiles.some(f => f.includes('security'))) {
+              labels.push('security');
+            }
+
+            // Draft PR
+            if (pr.draft) {
+              labels.push('work-in-progress');
+            }
+
+            // Needs review (if not draft and not by bot)
+            if (!pr.draft && !pr.user.login.includes('bot')) {
+              labels.push('needs-review');
+            }
+
+            // Apply labels
+            if (labels.length > 0) {
+              await github.rest.issues.addLabels({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: labels
+              });
+
+              console.log(`✅ Added labels to PR #${pr.number}: ${labels.join(', ')}`);
+            }
+
+  label-size-update:
+    name: Update Size Labels on PR Changes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request_target' && github.event.action == 'synchronize'
+
+    steps:
+      - name: Update size label
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+
+            // Get changed files
+            const files = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number
+            });
+
+            const additions = files.data.reduce((sum, f) => sum + f.additions, 0);
+            const deletions = files.data.reduce((sum, f) => sum + f.deletions, 0);
+            const totalChanges = additions + deletions;
+
+            // Determine new size label
+            let newSizeLabel;
+            if (totalChanges < 10) {
+              newSizeLabel = 'size/XS';
+            } else if (totalChanges < 50) {
+              newSizeLabel = 'size/S';
+            } else if (totalChanges < 250) {
+              newSizeLabel = 'size/M';
+            } else if (totalChanges < 1000) {
+              newSizeLabel = 'size/L';
+            } else {
+              newSizeLabel = 'size/XL';
+            }
+
+            // Get current labels
+            const currentLabels = pr.labels.map(l => l.name);
+            const sizeLabels = currentLabels.filter(l => l.startsWith('size/'));
+
+            // Remove old size labels
+            for (const label of sizeLabels) {
+              if (label !== newSizeLabel) {
+                await github.rest.issues.removeLabel({
+                  issue_number: pr.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label
+                });
+              }
+            }
+
+            // Add new size label if not already present
+            if (!currentLabels.includes(newSizeLabel)) {
+              await github.rest.issues.addLabels({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: [newSizeLabel]
+              });
+            }
+
+            console.log(`✅ Updated size label to ${newSizeLabel} (${totalChanges} changes)`);
+
+  auto-label-duplicate:
+    name: Detect and Label Duplicates
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issues' && github.event.action == 'opened'
+
+    steps:
+      - name: Check for duplicate issues
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issue = context.payload.issue;
+            const title = issue.title.toLowerCase();
+
+            // Search for similar issues
+            const query = `repo:${context.repo.owner}/${context.repo.repo} is:issue ${title.split(' ').slice(0, 5).join(' ')}`;
+
+            const searchResults = await github.rest.search.issuesAndPullRequests({
+              q: query,
+              per_page: 10
+            });
+
+            // Filter out the current issue and check for very similar titles
+            const similarIssues = searchResults.data.items.filter(i => {
+              if (i.number === issue.number) return false;
+
+              const similarity = i.title.toLowerCase();
+              // Simple similarity check
+              const commonWords = title.split(' ').filter(word =>
+                similarity.includes(word) && word.length > 3
+              );
+
+              return commonWords.length >= 3;
+            });
+
+            if (similarIssues.length > 0) {
+              await github.rest.issues.addLabels({
+                issue_number: issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['possible-duplicate']
+              });
+
+              const duplicateList = similarIssues
+                .slice(0, 3)
+                .map(i => `- #${i.number}: ${i.title}`)
+                .join('\n');
+
+              await github.rest.issues.createComment({
+                issue_number: issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `👀 This issue appears to be similar to existing issues:
+
+            ${duplicateList}
+
+            Please check if your issue is already reported. If it's a duplicate, please add your information to the existing issue instead.
+
+            If this is not a duplicate, please add more details to distinguish it from the similar issues above.
+
+            *This is an automated check to help reduce duplicate issues.*`
+              });
+
+              console.log(`✅ Detected possible duplicate for issue #${issue.number}`);
+            }

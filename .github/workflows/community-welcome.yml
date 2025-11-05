@@ -1,0 +1,301 @@
+name: Community Welcome
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+  discussion:
+    types: [created]
+
+permissions:
+  issues: write
+  pull-requests: write
+  discussions: write
+
+jobs:
+  welcome-first-time-contributors:
+    name: Welcome New Contributors
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Welcome first-time issue creator
+        if: github.event_name == 'issues'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const issue = context.payload.issue;
+            const creator = issue.user.login;
+
+            // Check if this is the user's first issue
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              creator: creator,
+              state: 'all'
+            });
+
+            if (issues.data.length === 1) {
+              const welcomeMessage = `👋 Welcome to Claude Code Agents, @${creator}!
+
+            Thank you for opening your first issue! We appreciate your contribution to the community.
+
+            ## What Happens Next?
+
+            1. **Review**: A maintainer will review your issue shortly
+            2. **Discussion**: We may ask for clarification or additional details
+            3. **Labels**: Your issue will be labeled appropriately
+            4. **Triage**: We'll prioritize and assign if needed
+
+            ## Helpful Resources
+
+            - 📖 [Contributing Guide](.github/CONTRIBUTING.md)
+            - 🤝 [Code of Conduct](.github/CODE_OF_CONDUCT.md)
+            - 📚 [Documentation](docs/)
+            - 💬 [Discussions](../../discussions)
+
+            ## Community Tips
+
+            - Please be patient - maintainers are volunteers
+            - Provide as much detail as possible
+            - Be respectful and follow our Code of Conduct
+            - Check existing issues to avoid duplicates
+
+            Thanks for helping make Claude Code Agents better! 🚀`;
+
+              await github.rest.issues.createComment({
+                issue_number: issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: welcomeMessage
+              });
+
+              console.log(`✅ Welcomed first-time issue creator: ${creator}`);
+            }
+
+      - name: Welcome first-time PR contributor
+        if: github.event_name == 'pull_request_target'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const creator = pr.user.login;
+
+            // Check if this is the user's first PR
+            const prs = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              per_page: 100
+            });
+
+            const userPRs = prs.data.filter(p => p.user.login === creator);
+
+            if (userPRs.length === 1) {
+              const welcomeMessage = `🎉 Thank you for your first contribution, @${creator}!
+
+            We're excited to review your pull request! Here's what to expect:
+
+            ## Review Process
+
+            1. **Automated Checks**: CI/CD workflows will run automatically
+            2. **Validation**: Plugin validation and quality checks
+            3. **Review**: A maintainer will review your code
+            4. **Feedback**: We may request changes or ask questions
+            5. **Merge**: Once approved, we'll merge your PR!
+
+            ## While You Wait
+
+            - ✅ Ensure all automated checks pass
+            - 📝 Make sure your PR description is clear and complete
+            - 🔗 Link to any related issues
+            - ✨ Follow our [Contributing Guidelines](.github/CONTRIBUTING.md)
+
+            ## First-Time Contributor Tips
+
+            - **Be responsive**: Reply to review comments promptly
+            - **Ask questions**: Don't hesitate to ask for clarification
+            - **Small PRs**: Smaller PRs are easier to review and merge faster
+            - **Test locally**: Make sure everything works before pushing
+            - **Follow conventions**: Match the existing code style
+
+            ## Recognition
+
+            All contributors are automatically added to our contributors list! Your contribution matters, no matter how big or small.
+
+            Thank you for helping improve Claude Code Agents! We appreciate your effort. 💙
+
+            ---
+            *Need help? Feel free to ask questions in the PR comments or [Discussions](../../discussions).*`;
+
+              await github.rest.issues.createComment({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: welcomeMessage
+              });
+
+              // Add a helpful label
+              await github.rest.issues.addLabels({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['first-time-contributor']
+              });
+
+              console.log(`✅ Welcomed first-time PR contributor: ${creator}`);
+            }
+
+      - name: Welcome first-time discussion participant
+        if: github.event_name == 'discussion'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const discussion = context.payload.discussion;
+            const creator = discussion.user.login;
+
+            const welcomeMessage = `👋 Welcome to the discussion, @${creator}!
+
+            Thank you for starting a conversation in our community!
+
+            ## Discussion Guidelines
+
+            - Be respectful and constructive
+            - Stay on topic
+            - Help others when you can
+            - Share your knowledge and experiences
+
+            ## Get Involved
+
+            - 📖 Browse our [Documentation](docs/)
+            - 🐛 Report issues or request features
+            - 💻 Contribute code via Pull Requests
+            - 🌟 Star the repository if you find it useful!
+
+            Looking forward to your contributions! 🚀`;
+
+            // Note: GitHub Discussions API is different, this is a simplified example
+            console.log(`Discussion created by: ${creator}`);
+
+  thank-contributors:
+    name: Thank Contributors on PR Merge
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request_target' && github.event.action == 'closed' && github.event.pull_request.merged == true
+
+    steps:
+      - name: Thank contributor for merged PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const contributor = pr.user.login;
+
+            const thankYouMessage = `🎉 Thank you @${contributor} for your contribution!
+
+            Your pull request has been merged! 🚀
+
+            ## What's Next?
+
+            - Your changes will be included in the next release
+            - You'll be listed in our contributors
+            - Check out the [Release Automation](../../actions/workflows/release-automation.yml) workflow
+
+            ## Stay Engaged
+
+            - 📢 Watch for release announcements
+            - 🐛 Help triage issues
+            - 💬 Participate in discussions
+            - 🔧 Submit more improvements!
+
+            We appreciate your time and effort in making Claude Code Agents better! 💙
+
+            ---
+            *Your contribution makes a difference!*`;
+
+            await github.rest.issues.createComment({
+              issue_number: pr.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: thankYouMessage
+            });
+
+            console.log(`✅ Thanked contributor: ${contributor}`);
+
+  assign-reviewers:
+    name: Auto-Assign Reviewers
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request_target' && github.event.action == 'opened'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Auto-assign reviewers based on files
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+
+            // Get list of changed files
+            const files = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number
+            });
+
+            const changedFiles = files.data.map(f => f.filename);
+
+            // Determine reviewers based on changed files
+            const reviewers = new Set();
+
+            // Workflow/CI changes - needs automation expert review
+            if (changedFiles.some(f => f.startsWith('.github/'))) {
+              console.log('PR modifies GitHub workflows - needs workflow review');
+              // Add labels but don't auto-assign for security
+              await github.rest.issues.addLabels({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['workflow-changes', 'needs-review']
+              });
+            }
+
+            // Plugin changes
+            if (changedFiles.some(f => f.startsWith('plugins/'))) {
+              await github.rest.issues.addLabels({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['plugin-update']
+              });
+            }
+
+            // Documentation changes
+            if (changedFiles.some(f => f.startsWith('docs/') || f.endsWith('.md'))) {
+              await github.rest.issues.addLabels({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['documentation']
+              });
+            }
+
+            // Marketplace changes
+            if (changedFiles.some(f => f.includes('marketplace.json'))) {
+              await github.rest.issues.addLabels({
+                issue_number: pr.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['marketplace-update', 'needs-review']
+              });
+            }
+
+            console.log(`✅ Analyzed PR and added appropriate labels`);

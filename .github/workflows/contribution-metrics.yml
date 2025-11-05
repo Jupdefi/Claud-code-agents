@@ -1,0 +1,390 @@
+name: Contribution Metrics
+
+on:
+  schedule:
+    # Run weekly on Monday at 00:00 UTC
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: read
+
+jobs:
+  generate-contributor-stats:
+    name: Generate Contributor Statistics
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Generate contribution statistics
+        run: |
+          cat > generate_stats.py << 'EOF'
+          import subprocess
+          import json
+          from collections import defaultdict
+          from datetime import datetime, timedelta
+
+          def get_contributors_stats():
+              # Get all contributors
+              result = subprocess.run(
+                  ['git', 'log', '--format=%aN|%aE', '--all'],
+                  capture_output=True,
+                  text=True
+              )
+
+              contributors = {}
+              for line in result.stdout.strip().split('\n'):
+                  if '|' in line:
+                      name, email = line.split('|')
+                      if email not in contributors:
+                          contributors[email] = name
+
+              stats = []
+              for email, name in contributors.items():
+                  # Count commits
+                  commit_count = subprocess.run(
+                      ['git', 'log', '--author', email, '--oneline'],
+                      capture_output=True,
+                      text=True
+                  ).stdout.count('\n')
+
+                  if commit_count > 0:
+                      stats.append({
+                          'name': name,
+                          'email': email,
+                          'commits': commit_count
+                      })
+
+              return sorted(stats, key=lambda x: x['commits'], reverse=True)
+
+          def get_recent_activity(days=30):
+              since_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+
+              result = subprocess.run(
+                  ['git', 'log', f'--since={since_date}', '--format=%aN'],
+                  capture_output=True,
+                  text=True
+              )
+
+              activity = defaultdict(int)
+              for name in result.stdout.strip().split('\n'):
+                  if name:
+                      activity[name] += 1
+
+              return dict(sorted(activity.items(), key=lambda x: x[1], reverse=True))
+
+          # Generate statistics
+          print("📊 Generating contribution statistics...\n")
+
+          all_contributors = get_contributors_stats()
+          recent_activity = get_recent_activity(30)
+
+          print(f"Total contributors: {len(all_contributors)}")
+          print(f"Active in last 30 days: {len(recent_activity)}\n")
+
+          # Save to JSON
+          stats = {
+              'generated': datetime.now().isoformat(),
+              'total_contributors': len(all_contributors),
+              'active_last_30_days': len(recent_activity),
+              'top_contributors': all_contributors[:20],
+              'recent_activity': recent_activity
+          }
+
+          with open('contributor-stats.json', 'w') as f:
+              json.dump(stats, f, indent=2)
+
+          print("✅ Statistics saved to contributor-stats.json")
+
+          # Generate markdown
+          md = ["# 👥 Contributor Statistics\n"]
+          md.append(f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}*\n")
+
+          md.append(f"## Overview\n")
+          md.append(f"- **Total Contributors**: {len(all_contributors)}")
+          md.append(f"- **Active (Last 30 days)**: {len(recent_activity)}\n")
+
+          md.append(f"## Top Contributors (All Time)\n")
+          for i, contributor in enumerate(all_contributors[:10], 1):
+              md.append(f"{i}. **{contributor['name']}** - {contributor['commits']} commits")
+
+          md.append(f"\n## Recent Activity (Last 30 Days)\n")
+          for name, count in list(recent_activity.items())[:10]:
+              md.append(f"- **{name}**: {count} commits")
+
+          md.append("\n---\n*Thank you to all our contributors! 🎉*")
+
+          with open('CONTRIBUTORS.md', 'w') as f:
+              f.write('\n'.join(md))
+
+          print("✅ Markdown saved to CONTRIBUTORS.md")
+          EOF
+
+          python generate_stats.py
+
+      - name: Upload statistics artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: contributor-statistics
+          path: |
+            contributor-stats.json
+            CONTRIBUTORS.md
+          retention-days: 90
+
+      - name: Commit contributor stats
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          if [ -f CONTRIBUTORS.md ]; then
+            git add CONTRIBUTORS.md contributor-stats.json
+            git commit -m "docs: update contributor statistics [skip ci]" || echo "No changes to commit"
+            git push || echo "Nothing to push"
+          fi
+
+  update-all-contributors:
+    name: Update All Contributors List
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update contributors list
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const pr = context.payload.pull_request;
+            const contributor = pr.user.login;
+
+            console.log(`Adding ${contributor} to contributors list`);
+
+            // This is a placeholder - you could integrate with all-contributors bot
+            // or maintain your own contributors file
+
+  monthly-summary:
+    name: Generate Monthly Summary
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate monthly summary
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // Get date range (last 30 days)
+            const now = new Date();
+            const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000);
+
+            // Get merged PRs
+            const prs = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: 'closed',
+              per_page: 100
+            });
+
+            const mergedPRs = prs.data.filter(pr =>
+              pr.merged_at &&
+              new Date(pr.merged_at) > thirtyDaysAgo
+            );
+
+            // Get closed issues
+            const issues = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: 'closed',
+              since: thirtyDaysAgo.toISOString(),
+              per_page: 100
+            });
+
+            const closedIssues = issues.data.filter(issue =>
+              !issue.pull_request &&
+              new Date(issue.closed_at) > thirtyDaysAgo
+            );
+
+            // Get new contributors
+            const contributors = new Set();
+            mergedPRs.forEach(pr => contributors.add(pr.user.login));
+
+            // Generate summary
+            const summary = `# 📊 Monthly Activity Summary
+
+            **Period**: ${thirtyDaysAgo.toLocaleDateString()} - ${now.toLocaleDateString()}
+
+            ## Highlights
+
+            - 🔀 **Merged PRs**: ${mergedPRs.length}
+            - ✅ **Closed Issues**: ${closedIssues.length}
+            - 👥 **Active Contributors**: ${contributors.size}
+
+            ## Top Merged PRs
+
+            ${mergedPRs.slice(0, 5).map(pr =>
+              `- [#${pr.number}](${pr.html_url}): ${pr.title} by @${pr.user.login}`
+            ).join('\n')}
+
+            ## Recently Closed Issues
+
+            ${closedIssues.slice(0, 5).map(issue =>
+              `- [#${issue.number}](${issue.html_url}): ${issue.title}`
+            ).join('\n')}
+
+            ---
+            *This summary is auto-generated weekly*`;
+
+            console.log(summary);
+
+            // Could post this as a discussion or save as a file
+
+  track-response-times:
+    name: Track Response Times
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Calculate average response times
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // Get recent issues
+            const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+            const issues = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: 'all',
+              since: thirtyDaysAgo.toISOString(),
+              per_page: 100
+            });
+
+            const responseTimes = [];
+
+            for (const issue of issues.data) {
+              if (issue.pull_request) continue;
+
+              const comments = await github.rest.issues.listComments({
+                owner,
+                repo,
+                issue_number: issue.number
+              });
+
+              if (comments.data.length > 0) {
+                const created = new Date(issue.created_at);
+                const firstResponse = new Date(comments.data[0].created_at);
+                const responseTime = (firstResponse - created) / (1000 * 60 * 60); // hours
+
+                responseTimes.push(responseTime);
+              }
+            }
+
+            if (responseTimes.length > 0) {
+              const avgResponseTime = responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length;
+              const medianResponseTime = responseTimes.sort((a, b) => a - b)[Math.floor(responseTimes.length / 2)];
+
+              console.log(`📊 Response Time Metrics (Last 30 Days):`);
+              console.log(`- Issues analyzed: ${responseTimes.length}`);
+              console.log(`- Average first response: ${avgResponseTime.toFixed(2)} hours`);
+              console.log(`- Median first response: ${medianResponseTime.toFixed(2)} hours`);
+
+              // Create a summary comment or file
+              const summary = {
+                period: '30 days',
+                issues_analyzed: responseTimes.length,
+                avg_response_hours: avgResponseTime.toFixed(2),
+                median_response_hours: medianResponseTime.toFixed(2)
+              };
+
+              console.log('\nMetrics:', JSON.stringify(summary, null, 2));
+            } else {
+              console.log('No issues with responses in the last 30 days');
+            }
+
+  celebrate-milestones:
+    name: Celebrate Milestones
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+
+    steps:
+      - name: Check and celebrate milestones
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const contributor = context.payload.pull_request.user.login;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // Get all PRs by this contributor
+            const allPRs = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: 'all',
+              per_page: 100
+            });
+
+            const contributorPRs = allPRs.data.filter(pr =>
+              pr.user.login === contributor && pr.merged_at
+            );
+
+            const count = contributorPRs.length;
+            const milestones = [1, 5, 10, 25, 50, 100];
+
+            if (milestones.includes(count)) {
+              const pr = context.payload.pull_request;
+
+              let message = '';
+              if (count === 1) {
+                message = `🎉 **First Contribution Merged!**
+
+                Congratulations @${contributor} on your first merged pull request!
+
+                Welcome to the contributors family! 🎊`;
+              } else {
+                message = `🌟 **Milestone Achievement!**
+
+                Congratulations @${contributor} on your ${count}${count === 5 ? 'th' : count === 10 ? 'th' : count === 25 ? 'th' : count === 50 ? 'th' : 'th'} merged pull request!
+
+                Thank you for your continued contributions to Claude Code Agents! 🙏`;
+              }
+
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: pr.number,
+                body: message
+              });
+
+              console.log(`🎉 Celebrated milestone for ${contributor}: ${count} merged PRs`);
+            }
