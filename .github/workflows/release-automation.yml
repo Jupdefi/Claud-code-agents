@@ -1,0 +1,283 @@
+name: Release Automation
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - '.claude-plugin/marketplace.json'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 1.3.0)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  detect-version-change:
+    name: Detect Version Change
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      should_release: ${{ steps.detect.outputs.should_release }}
+      version_changed: ${{ steps.detect.outputs.version_changed }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect version from marketplace.json
+        id: detect
+        run: |
+          # Get current version from marketplace.json
+          CURRENT_VERSION=$(jq -r '.metadata.version' .claude-plugin/marketplace.json)
+          echo "Current version: $CURRENT_VERSION"
+          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+          # Check if this is a manual workflow dispatch
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "version_changed=true" >> $GITHUB_OUTPUT
+            echo "Manual release triggered for version: ${{ inputs.version }}"
+            exit 0
+          fi
+
+          # Check if version tag already exists
+          if git tag | grep -q "^v${CURRENT_VERSION}$"; then
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "version_changed=false" >> $GITHUB_OUTPUT
+            echo "Version v${CURRENT_VERSION} already released"
+            exit 0
+          fi
+
+          # Check if version changed in the last commit
+          git show HEAD~1:.claude-plugin/marketplace.json > /tmp/old_marketplace.json 2>/dev/null || echo '{"metadata":{"version":"0.0.0"}}' > /tmp/old_marketplace.json
+          OLD_VERSION=$(jq -r '.metadata.version' /tmp/old_marketplace.json)
+
+          echo "Previous version: $OLD_VERSION"
+
+          if [ "$CURRENT_VERSION" != "$OLD_VERSION" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "version_changed=true" >> $GITHUB_OUTPUT
+            echo "✅ Version changed from $OLD_VERSION to $CURRENT_VERSION"
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "version_changed=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ Version unchanged"
+          fi
+
+  validate-version:
+    name: Validate Version Format
+    runs-on: ubuntu-latest
+    needs: detect-version-change
+    if: needs.detect-version-change.outputs.should_release == 'true'
+
+    steps:
+      - name: Validate semantic versioning
+        run: |
+          VERSION="${{ needs.detect-version-change.outputs.version }}"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ Invalid version format: $VERSION"
+            echo "Version must follow semantic versioning (e.g., 1.2.3)"
+            exit 1
+          fi
+
+          echo "✅ Version format valid: $VERSION"
+
+  generate-release-notes:
+    name: Generate Release Notes
+    runs-on: ubuntu-latest
+    needs: [detect-version-change, validate-version]
+    if: needs.detect-version-change.outputs.should_release == 'true'
+    outputs:
+      changelog: ${{ steps.changelog.outputs.changelog }}
+      release_name: ${{ steps.names.outputs.release_name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Make changelog generator executable
+        run: chmod +x .github/scripts/generate-changelog.py
+
+      - name: Generate release names
+        id: names
+        run: |
+          VERSION="${{ needs.detect-version-change.outputs.version }}"
+          echo "release_name=v${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          VERSION="${{ needs.detect-version-change.outputs.version }}"
+
+          # Generate changelog since last tag
+          python .github/scripts/generate-changelog.py \
+            --version "$VERSION" \
+            --output CHANGELOG.md
+
+          # Read changelog and set as output (escape for GitHub Actions)
+          CHANGELOG=$(cat CHANGELOG.md)
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "✅ Generated changelog for version $VERSION"
+
+      - name: Upload changelog
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-changelog
+          path: CHANGELOG.md
+          retention-days: 90
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [detect-version-change, validate-version, generate-release-notes]
+    if: needs.detect-version-change.outputs.should_release == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create Git Tag
+        run: |
+          VERSION="${{ needs.detect-version-change.outputs.version }}"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          git tag -a "v${VERSION}" -m "Release version ${VERSION}"
+          git push origin "v${VERSION}"
+
+          echo "✅ Created and pushed tag v${VERSION}"
+
+      - name: Create GitHub Release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const version = '${{ needs.detect-version-change.outputs.version }}';
+            const changelog = `${{ needs.generate-release-notes.outputs.changelog }}`;
+
+            const release = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: `v${version}`,
+              name: `Release v${version}`,
+              body: changelog,
+              draft: false,
+              prerelease: ${{ inputs.prerelease || false }}
+            });
+
+            console.log(`✅ Created release: ${release.data.html_url}`);
+            core.setOutput('release_url', release.data.html_url);
+
+      - name: Generate release statistics
+        run: |
+          VERSION="${{ needs.detect-version-change.outputs.version }}"
+
+          # Count plugins by category
+          echo "📊 Release Statistics for v${VERSION}:"
+          echo ""
+          jq -r '.plugins | group_by(.category) | .[] | "\(.[0].category): \(length) plugins"' .claude-plugin/marketplace.json
+
+          echo ""
+          echo "Total Plugins: $(jq '.plugins | length' .claude-plugin/marketplace.json)"
+          echo "Total Agents: $(jq '[.plugins[].agents | length] | add' .claude-plugin/marketplace.json)"
+          echo "Total Skills: $(jq '[.plugins[].skills | length] | add' .claude-plugin/marketplace.json)"
+          echo "Total Commands: $(jq '[.plugins[].commands | length] | add' .claude-plugin/marketplace.json)"
+
+  notify-release:
+    name: Notify Release
+    runs-on: ubuntu-latest
+    needs: [detect-version-change, create-release]
+    if: needs.detect-version-change.outputs.should_release == 'true'
+
+    steps:
+      - name: Create release summary
+        run: |
+          VERSION="${{ needs.detect-version-change.outputs.version }}"
+
+          cat << EOF > $GITHUB_STEP_SUMMARY
+          # 🚀 Release v${VERSION} Created!
+
+          ## Release Information
+          - **Version**: v${VERSION}
+          - **Tag**: v${VERSION}
+          - **Triggered by**: ${{ github.event_name }}
+          - **Branch**: ${{ github.ref_name }}
+
+          ## What's Next?
+          1. ✅ Release created and tagged
+          2. 📝 Changelog generated
+          3. 🎉 Ready for announcement!
+
+          ---
+          *Generated by release-automation workflow*
+          EOF
+
+          echo "✅ Release v${VERSION} completed successfully!"
+
+  update-version-tracking:
+    name: Update Version Tracking
+    runs-on: ubuntu-latest
+    needs: [detect-version-change, create-release]
+    if: needs.detect-version-change.outputs.should_release == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update version history
+        run: |
+          VERSION="${{ needs.detect-version-change.outputs.version }}"
+          DATE=$(date +%Y-%m-%d)
+
+          # Create or update VERSION_HISTORY.md
+          if [ ! -f VERSION_HISTORY.md ]; then
+            echo "# Version History" > VERSION_HISTORY.md
+            echo "" >> VERSION_HISTORY.md
+          fi
+
+          # Prepend new version
+          {
+            echo "## v${VERSION} - ${DATE}"
+            echo ""
+            echo "See [Release Notes](https://github.com/${{ github.repository }}/releases/tag/v${VERSION})"
+            echo ""
+            cat VERSION_HISTORY.md
+          } > VERSION_HISTORY.md.tmp
+
+          mv VERSION_HISTORY.md.tmp VERSION_HISTORY.md
+
+          echo "✅ Updated VERSION_HISTORY.md"
+
+      - name: Commit version history
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          git add VERSION_HISTORY.md
+          git commit -m "chore: update version history for v${{ needs.detect-version-change.outputs.version }} [skip ci]" || echo "No changes to commit"
+          git push || echo "Nothing to push"
